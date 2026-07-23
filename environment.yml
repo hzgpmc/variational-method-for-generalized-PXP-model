@@ -1,0 +1,13 @@
+name: pxp-variational-repro
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - numpy==2.3.3
+      - scipy==1.16.2
+      - matplotlib==3.10.6
+      - numba==0.62.0
+      - quspin==1.0.0
+
