@@ -1,0 +1,11 @@
+# Generated numerical caches, checkpoints, figures, and tables.
+fig1fig2/data/
+fig1fig2/output/
+
+# Python and local tool caches.
+__pycache__/
+*.py[cod]
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+
