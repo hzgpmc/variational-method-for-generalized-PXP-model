@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dense TDVP sampling of the low-leakage confinement structures.
+"""Geometry-aware TDVP sampling of low-leakage confinement structures.
 
 This supplementary, manuscript-independent calculation answers three
 questions suggested by Fig. 1:
@@ -12,9 +12,9 @@ questions suggested by Fig. 1:
 
 No numerical dataset is required.  If the leakage background is absent, the
 script generates its 301-by-201 map directly from ``tdvpfun.eom`` with
-resumable row checkpoints.  The 44 physical coordinates are locked to the
-result of the original full-map data-driven search, so regenerating the
-background cannot silently move the strict diagnostic points.  Every marked
+resumable row checkpoints.  The 24 physical coordinates are locked after a
+leakage-and-spacing audit, so regenerating the background cannot silently move
+the strict diagnostic points.  Every marked
 point is reintegrated with exactly the strict TDVP protocol used by the current
 Fig. 1/Fig. 2 reproducer: spin 1/2, K=100, T=10, pole bias and initial phase
 1e-3, DOP853, rtol=1e-9, atol=1e-11, and max_step=0.02.  The script writes a
@@ -82,7 +82,7 @@ from scipy.integrate import solve_ivp
 import tdvpfun
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 BACKGROUND_SCHEMA_VERSION = 1
 
 # This block is the single source of truth for all new integrations.
@@ -99,7 +99,7 @@ MAX_STEP = 0.02
 # Pure-code leakage-background protocol.  The default 301-by-201 grid and
 # 250 left-endpoint samples reproduce the historical Fig. 1 landscape.  The
 # lower-tolerance scan is used only as a selection/visualization background;
-# all 44 marked trajectories are independently reintegrated with the strict
+# all 24 marked trajectories are independently reintegrated with the strict
 # protocol above.
 BACKGROUND_MU_RANGE = (-1.5, 1.5)
 BACKGROUND_CHI_RANGE = (0.0, 2.0)
@@ -121,39 +121,52 @@ GENERATED_BACKGROUND_SOURCES = {
     REPRODUCER_BACKGROUND_SOURCE,
 }
 
-# Point-selection controls.  They are kept explicit so the supplementary scan
-# can be extended without touching integration or plotting code.
+# Point-selection controls.  The non-valley families must first lie below
+# 0.04 on the exploratory background and then below 0.05 after strict DOP853
+# reintegration.  Within each family, the Euclidean parameter-space spacing is
+# at least 0.05; mu and chi are detunings in the same units.
+BACKGROUND_LOW_LEAKAGE_TARGET = 0.04
+STRICT_LOW_LEAKAGE_TARGET = 0.05
+MIN_SELECTION_DISTANCE = 0.05
+
+# Five well-separated anchors follow the narrow P1--P2 valley and include the
+# manuscript points P1 and P2 exactly.  This is the one family intentionally
+# exempted from the low-leakage threshold.
 CANONICAL_VALLEY_POINTS = (
     (-0.020, 0.100),
-    (-0.020, 0.130),
-    (-0.030, 0.160),
-    (-0.030, 0.190),
-    (-0.030, 0.220),
-    (-0.030, 0.250),
-    (-0.040, 0.280),
-    (-0.030, 0.310),
+    (-0.025, 0.150),
+    (-0.030, 0.205),
+    (-0.035, 0.261),
     (-0.030, 0.340),
 )
-CANONICAL_ARC_POINTS = (
-    (-0.650, 1.300),
-    (-0.670, 1.340),
-    (-0.670, 1.380),
-    (-0.700, 1.400),
-    (-0.677, 1.417),
-    (-0.760, 1.460),
-    (-0.830, 1.500),
-    (-0.910, 1.540),
-    (-0.950, 1.580),
-)
+
 P4 = (-0.677, 1.417)
 
-RESONANCE_LINE_CHI = np.linspace(1.31, 1.91, 9)
+# The P4-connected low-leakage structure is a two-sided U-shaped arc.  Points
+# are ordered from the negative-delta_res arm through P4 and then along the
+# positive-delta_res arm.  Matching chi levels on the two arms make the
+# coverage visible without clustering near the arc bottom.
+CANONICAL_ARC_POINTS = (
+    (-1.310, 1.880),
+    (-1.150, 1.740),
+    (-0.990, 1.600),
+    (-0.780, 1.460),
+    P4,
+    (-0.590, 1.460),
+    (-0.510, 1.600),
+    (-0.500, 1.740),
+    (-0.510, 1.880),
+)
+
+# Five sparse low-leakage points cover the isolated chi~0.86 window and the
+# higher-chi low-leakage segment of the bare resonance line.
+RESONANCE_LINE_CHI = np.asarray([0.86, 1.38, 1.58, 1.78, 1.98])
 
 # This transverse scan keeps chi fixed at its manuscript P4 value.  The
 # defect site is i0=49, on the odd sublattice, so its onsite detuning is
 # exactly Delta_i0=2mu+chi=delta_res along this cut.
 TRANSVERSE_CHI = P4[1]
-TRANSVERSE_DELTAS = np.linspace(-0.20, 0.20, 17)
+TRANSVERSE_DELTAS = np.asarray([-0.20, -0.10, 0.00, 0.10, 0.20])
 
 GROUP_ORDER = ("valley", "arc", "resonance_line", "transverse")
 GROUP_STYLE = {
@@ -165,7 +178,7 @@ GROUP_STYLE = {
     },
     "arc": {
         "prefix": "A",
-        "label": r"P4 arc",
+        "label": r"P4 two-sided arc",
         "color": "#E69F00",
         "marker": "s",
     },
@@ -183,11 +196,15 @@ GROUP_STYLE = {
     },
 }
 
-# The single multi-orbit panel shows five representatives from the dense
-# fixed-chi cut.  All 44 points are nevertheless integrated and cached.
-TRANSVERSE_REPRESENTATIVE_INDICES = (0, 4, 8, 12, 16)
+# The single multi-orbit panel shows every point of the sparse fixed-chi cut.
+TRANSVERSE_REPRESENTATIVE_INDICES = (0, 1, 2, 3, 4)
 GRID_GROUPS = ("valley", "arc", "resonance_line")
-GRID_REPRESENTATIVE_INDICES = (0, 2, 4, 6, 8)
+GRID_REPRESENTATIVE_INDICES = {
+    "valley": (0, 1, 2, 3, 4),
+    # Negative arm (outer, inner), P4, positive arm (inner, outer).
+    "arc": (0, 3, 4, 5, 8),
+    "resonance_line": (0, 1, 2, 3, 4),
+}
 
 
 @dataclass(frozen=True)
@@ -668,14 +685,29 @@ def bilinear_value(
     return float((1.0 - chi_fraction) * lower + chi_fraction * upper)
 
 
+def minimum_family_spacing(points: list[SelectedPoint], group: str) -> float:
+    """Return the minimum Euclidean (mu, chi) distance within one family."""
+
+    coordinates = np.asarray(
+        [(point.mu, point.chi) for point in points if point.group == group],
+        dtype=float,
+    )
+    if len(coordinates) < 2:
+        return float("inf")
+    differences = coordinates[:, None, :] - coordinates[None, :, :]
+    distances = np.linalg.norm(differences, axis=2)
+    distances[np.diag_indices_from(distances)] = np.inf
+    return float(np.min(distances))
+
+
 def select_points(
     mu_grid: np.ndarray, chi_grid: np.ndarray, leakage: np.ndarray
 ) -> list[SelectedPoint]:
-    """Return the locked coordinates from the original data-driven search.
+    """Return the locked, low-leakage, well-separated physical coordinates.
 
     The full leakage map remains a generated visual/background diagnostic, but
     small solver or grid changes cannot silently move the Appendix-H points.
-    This makes the strict 44-trajectory conclusion dataset independent.
+    This makes the strict 24-trajectory conclusion dataset independent.
     """
 
     selected: list[SelectedPoint] = []
@@ -699,8 +731,8 @@ def select_points(
                 mu_value,
                 chi_value,
                 (
-                    "locked result of the full-map P1/P2-valley "
-                    "minimum search"
+                    "well-separated P1/P2-valley anchor; exact P1 and P2 "
+                    "are included"
                 ),
             )
         )
@@ -718,8 +750,8 @@ def select_points(
                     "exact manuscript P4 anchor"
                     if (mu_value, chi_value) == P4
                     else (
-                        "locked result of the full-map P4-anchored "
-                        "arc trace"
+                        "well-separated point on the two-sided "
+                        "P4-connected low-leakage arc"
                     )
                 ),
             )
@@ -733,7 +765,7 @@ def select_points(
                 "resonance_line",
                 -0.5 * float(chi_value),
                 float(chi_value),
-                "uniform sampling along chi+2mu=0",
+                "well-separated low-leakage sample on chi+2mu=0",
             )
         )
 
@@ -746,13 +778,37 @@ def select_points(
                 "transverse",
                 0.5 * (float(delta_res) - TRANSVERSE_CHI),
                 TRANSVERSE_CHI,
-                "fixed chi=chi_P4; Delta_i0=2mu+chi is scanned directly",
+                "sparse fixed-chi cut through Delta_i0=2mu+chi",
             )
         )
 
     identifiers = [point.point_id for point in selected]
     if len(identifiers) != len(set(identifiers)):
         raise AssertionError("selected point identifiers must be unique")
+
+    for group in GROUP_ORDER:
+        spacing = minimum_family_spacing(selected, group)
+        if spacing < MIN_SELECTION_DISTANCE - 1.0e-12:
+            raise ValueError(
+                f"{group} minimum spacing {spacing:.6f} is below "
+                f"{MIN_SELECTION_DISTANCE:.6f}"
+            )
+
+    for point in selected:
+        if point.group == "valley":
+            continue
+        map_leakage = bilinear_value(
+            mu_grid,
+            chi_grid,
+            leakage,
+            point.mu,
+            point.chi,
+        )
+        if map_leakage >= BACKGROUND_LOW_LEAKAGE_TARGET:
+            raise ValueError(
+                f"{point.point_id} background leakage {map_leakage:.6f} "
+                f"is not below {BACKGROUND_LOW_LEAKAGE_TARGET:.3f}"
+            )
     return selected
 
 
@@ -835,7 +891,7 @@ def generate_cache(
     cache_path: Path,
     leakage_path: Path,
 ) -> None:
-    """Select, integrate, diagnose, and cache all dense-sampling points."""
+    """Select, integrate, diagnose, and cache all audited sample points."""
 
     with np.load(leakage_path, allow_pickle=False) as background:
         valid, reason = validate_background_cache(background)
@@ -900,6 +956,16 @@ def generate_cache(
             flush=True,
         )
 
+    for point, strict_value in zip(points, strict_leakage):
+        if (
+            point.group != "valley"
+            and strict_value >= STRICT_LOW_LEAKAGE_TARGET
+        ):
+            raise ValueError(
+                f"{point.point_id} strict mean leakage {strict_value:.6f} "
+                f"is not below {STRICT_LOW_LEAKAGE_TARGET:.3f}"
+            )
+
     i0 = defect_site(TDVP_PERIOD)
     local_sites = i0 + np.asarray([-1, 0, 1], dtype=int)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -914,7 +980,7 @@ def generate_cache(
         mu=np.asarray([point.mu for point in points]),
         chi=np.asarray([point.chi for point in points]),
         delta_res=np.asarray([point.delta_res for point in points]),
-        background_map_leakage=np.asarray(map_leakage),
+        background_map_mean_leakage=np.asarray(map_leakage),
         strict_mean_leakage=np.asarray(strict_leakage),
         theta=np.asarray(theta_values),
         phi=np.asarray(phi_values),
@@ -970,7 +1036,7 @@ def validate_cache(
         "mu",
         "chi",
         "delta_res",
-        "background_map_leakage",
+        "background_map_mean_leakage",
         "strict_mean_leakage",
         "theta",
         "phi",
@@ -1087,28 +1153,35 @@ def validate_cache(
     return True, "ok"
 
 
-def linear_crossing(
+def transition_bracket(
     coordinate: np.ndarray,
     values: np.ndarray,
     target: float,
-) -> float | None:
-    """Linearly interpolate the crossing nearest coordinate zero."""
+) -> list[float] | None:
+    """Return the sampled sign-change interval nearest coordinate zero.
+
+    No interpolation is reported: finite-time orbit diagnostics can vary
+    nonmonotonically between samples, so the data support only a bracket.
+    """
 
     order = np.argsort(coordinate)
     x = np.asarray(coordinate[order], dtype=float)
     y = np.asarray(values[order], dtype=float) - target
-    candidates: list[float] = []
+    candidates: list[list[float]] = []
     for index in range(len(x) - 1):
         if y[index] == 0.0:
-            candidates.append(float(x[index]))
+            candidates.append([float(x[index]), float(x[index])])
         elif y[index] * y[index + 1] < 0.0:
-            fraction = -y[index] / (y[index + 1] - y[index])
             candidates.append(
-                float(x[index] + fraction * (x[index + 1] - x[index]))
+                [float(x[index]), float(x[index + 1])]
             )
     if y[-1] == 0.0:
-        candidates.append(float(x[-1]))
-    return min(candidates, key=abs) if candidates else None
+        candidates.append([float(x[-1]), float(x[-1])])
+    return (
+        min(candidates, key=lambda interval: abs(np.mean(interval)))
+        if candidates
+        else None
+    )
 
 
 def point_rows(archive: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
@@ -1126,7 +1199,7 @@ def point_rows(archive: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
                     archive["delta_res"][index]
                 ),
                 "background_map_mean_leakage": float(
-                    archive["background_map_leakage"][index]
+                    archive["background_map_mean_leakage"][index]
                 ),
                 "strict_mean_leakage": float(
                     archive["strict_mean_leakage"][index]
@@ -1170,7 +1243,7 @@ def portrait_grid_rows(
     rows: list[dict[str, Any]] = []
     for group in GRID_GROUPS:
         group_indices = np.flatnonzero(groups == group)
-        for local_index in GRID_REPRESENTATIVE_INDICES:
+        for local_index in GRID_REPRESENTATIVE_INDICES[group]:
             point_index = int(group_indices[local_index])
             point_id = str(archive["point_id"][point_index])
             source = all_rows[point_id]
@@ -1211,16 +1284,16 @@ def build_summary(
     strict_leakage = np.asarray(
         archive["strict_mean_leakage"][transverse], dtype=float
     )
-    centroid_crossing = linear_crossing(delta, centroid, 0.0)
-    fraction_crossing = linear_crossing(delta, left_fraction, 0.5)
-    monotone_centroid = bool(np.all(np.diff(centroid) < 0.0))
-    monotone_fraction = bool(np.all(np.diff(left_fraction) > 0.0))
-    low_leakage = bool(np.max(strict_leakage) < 0.05)
+    centroid_bracket = transition_bracket(delta, centroid, 0.0)
+    fraction_bracket = transition_bracket(delta, left_fraction, 0.5)
+    low_leakage = bool(
+        np.max(strict_leakage) < STRICT_LOW_LEAKAGE_TARGET
+    )
     near_line = bool(
-        centroid_crossing is not None
-        and fraction_crossing is not None
-        and abs(centroid_crossing) <= 0.12
-        and abs(fraction_crossing) <= 0.12
+        centroid_bracket is not None
+        and fraction_bracket is not None
+        and max(abs(value) for value in centroid_bracket) <= 0.12
+        and max(abs(value) for value in fraction_bracket) <= 0.12
     )
     supported = bool(
         low_leakage
@@ -1233,6 +1306,28 @@ def build_summary(
     group_counts = {
         group: int(np.count_nonzero(groups == group)) for group in GROUP_ORDER
     }
+    group_minimum_spacing: dict[str, float] = {}
+    for group in GROUP_ORDER:
+        mask = groups == group
+        coordinates = np.column_stack(
+            (
+                np.asarray(archive["mu"][mask], dtype=float),
+                np.asarray(archive["chi"][mask], dtype=float),
+            )
+        )
+        distances = np.linalg.norm(
+            coordinates[:, None, :] - coordinates[None, :, :],
+            axis=2,
+        )
+        distances[np.diag_indices_from(distances)] = np.inf
+        group_minimum_spacing[group] = float(np.min(distances))
+    non_valley = groups != "valley"
+    strict_non_valley = np.asarray(
+        archive["strict_mean_leakage"][non_valley], dtype=float
+    )
+    background_non_valley = np.asarray(
+        archive["background_map_mean_leakage"][non_valley], dtype=float
+    )
     with np.load(leakage_path, allow_pickle=False) as background:
         background_source = str(
             np.asarray(background["source_name"]).item()
@@ -1243,8 +1338,9 @@ def build_summary(
     return {
         "schema_version": SCHEMA_VERSION,
         "description": (
-            "Dense K=100, T=10 TDVP sampling of the P1/P2 valley, P4 arc, "
-            "resonance line, and a fixed-chi cut across it"
+            "Geometry-aware, well-separated K=100, T=10 TDVP sampling of "
+            "the P1/P2 valley, both arms of the P4 arc, the resonance line, "
+            "and a fixed-chi cut across it"
         ),
         "artifacts": {
             "trajectory_cache": str(cache_path.resolve()),
@@ -1292,13 +1388,32 @@ def build_summary(
         "selection": {
             "group_counts": group_counts,
             "total_points": int(len(groups)),
+            "background_low_leakage_target_excluding_valley": (
+                BACKGROUND_LOW_LEAKAGE_TARGET
+            ),
+            "strict_low_leakage_target_excluding_valley": (
+                STRICT_LOW_LEAKAGE_TARGET
+            ),
+            "maximum_background_map_mean_leakage_excluding_valley": (
+                float(np.max(background_non_valley))
+            ),
+            "maximum_strict_mean_leakage_excluding_valley": float(
+                np.max(strict_non_valley)
+            ),
+            "minimum_parameter_space_spacing_required": (
+                MIN_SELECTION_DISTANCE
+            ),
+            "minimum_parameter_space_spacing_by_group": (
+                group_minimum_spacing
+            ),
             "P1_P2_valley": {
                 "coordinates": [
                     list(point) for point in CANONICAL_VALLEY_POINTS
                 ],
                 "rule": (
-                    "coordinates locked after the original full-background "
-                    "row-minimum search"
+                    "five separated anchors spanning the narrow valley, "
+                    "including manuscript points P1 and P2 exactly; this "
+                    "family is exempt from the leakage threshold"
                 ),
             },
             "P4_arc": {
@@ -1307,13 +1422,18 @@ def build_summary(
                 ],
                 "anchor": list(P4),
                 "rule": (
-                    "coordinates locked after the original full-background "
-                    "P4-anchored connected-valley search"
+                    "nine separated low-leakage coordinates ordered from "
+                    "the negative-delta arm through P4 to the positive-delta "
+                    "arm, with paired chi levels on the two sides"
                 ),
             },
             "resonance_line": {
                 "coordinate": "delta_res = chi + 2 mu",
                 "chi_values": RESONANCE_LINE_CHI.tolist(),
+                "rule": (
+                    "five separated low-leakage samples spanning the "
+                    "available resonance-line windows"
+                ),
             },
             "transverse_cut": {
                 "fixed_chi": TRANSVERSE_CHI,
@@ -1323,15 +1443,15 @@ def build_summary(
                 "delta_res_values": TRANSVERSE_DELTAS.tolist(),
             },
         },
-        "resonance_mode_transition": {
+        "resonance_orbit_crossover": {
             "centroid_definition": (
                 "T^-1 integral sin(theta_i0) cos(phi_i0) dt"
             ),
             "left_fraction_definition": (
                 "T^-1 integral Theta[-sin(theta_i0) cos(phi_i0)] dt"
             ),
-            "centroid_zero_crossing_delta_res": centroid_crossing,
-            "left_fraction_half_crossing_delta_res": fraction_crossing,
+            "centroid_sign_change_bracket_delta_res": centroid_bracket,
+            "left_fraction_half_bracket_delta_res": fraction_bracket,
             "centroid_at_negative_endpoint": float(centroid[0]),
             "centroid_at_positive_endpoint": float(centroid[-1]),
             "left_fraction_at_negative_endpoint": float(left_fraction[0]),
@@ -1339,15 +1459,12 @@ def build_summary(
             "maximum_strict_mean_leakage_on_cut": float(
                 np.max(strict_leakage)
             ),
-            "centroid_strictly_decreases_on_sampled_cut": monotone_centroid,
-            "left_fraction_strictly_increases_on_sampled_cut": (
-                monotone_fraction
-            ),
-            "supports_near_resonance_mode_transition": supported,
+            "supports_near_resonance_orbit_crossover": supported,
             "interpretation": (
-                "The finite-T orbit moves from the positive to the negative "
-                "Bloch half-plane within a small positive delta_res offset "
-                "of the nominal resonance line."
+                "The sparse low-leakage samples bracket a finite-T orbit "
+                "crossover from the positive to the negative Bloch "
+                "half-plane near the nominal resonance line.  They do not "
+                "define a unique interpolated crossing."
                 if supported
                 else (
                     "The sampled low-leakage cut does not provide a robust "
@@ -1357,7 +1474,9 @@ def build_summary(
             ),
             "scope_limit": (
                 "This is a finite-time, single-initial-state TDVP diagnostic; "
-                "it does not establish a phase transition or long-time chaos."
+                "the diagnostics need not vary monotonically between sparse "
+                "samples, and the result does not establish a phase "
+                "transition or long-time chaos."
             ),
         },
         "portrait_grid_representatives": portrait_grid_rows(archive),
@@ -1535,12 +1654,17 @@ def plot_transition_diagnostics(
     )
     centroid_axis.axhline(0.0, color="0.65", lw=0.65)
     centroid_axis.axvline(0.0, color="0.45", lw=0.65, ls=(0, (3, 2)))
-    crossing = summary["resonance_mode_transition"][
-        "centroid_zero_crossing_delta_res"
+    centroid_bracket = summary["resonance_orbit_crossover"][
+        "centroid_sign_change_bracket_delta_res"
     ]
-    if crossing is not None:
-        centroid_axis.axvline(
-            crossing, color=color, lw=0.7, ls=(0, (1.5, 1.5))
+    if centroid_bracket is not None:
+        centroid_axis.axvspan(
+            centroid_bracket[0],
+            centroid_bracket[1],
+            color=color,
+            alpha=0.10,
+            lw=0.0,
+            zorder=0,
         )
     centroid_axis.set(
         xlim=(-0.21, 0.21),
@@ -1573,12 +1697,17 @@ def plot_transition_diagnostics(
     )
     fraction_axis.axhline(0.5, color="0.65", lw=0.65)
     fraction_axis.axvline(0.0, color="0.45", lw=0.65, ls=(0, (3, 2)))
-    fraction_crossing = summary["resonance_mode_transition"][
-        "left_fraction_half_crossing_delta_res"
+    fraction_bracket = summary["resonance_orbit_crossover"][
+        "left_fraction_half_bracket_delta_res"
     ]
-    if fraction_crossing is not None:
-        fraction_axis.axvline(
-            fraction_crossing, color=color, lw=0.7, ls=(0, (1.5, 1.5))
+    if fraction_bracket is not None:
+        fraction_axis.axvspan(
+            fraction_bracket[0],
+            fraction_bracket[1],
+            color=color,
+            alpha=0.10,
+            lw=0.0,
+            zorder=0,
         )
     fraction_axis.set(
         xlim=(-0.21, 0.21),
@@ -1929,7 +2058,7 @@ def plot_portrait_grid(
         group_indices = np.flatnonzero(groups == group)
         selected = [
             int(group_indices[index])
-            for index in GRID_REPRESENTATIVE_INDICES
+            for index in GRID_REPRESENTATIVE_INDICES[group]
         ]
         for column_index, point_index in enumerate(selected):
             axis = figure.add_subplot(grid[row_index, column_index])
@@ -2213,15 +2342,15 @@ def main() -> int:
                 "portrait_png": (
                     None if args.data_only else str(args.portrait_png)
                 ),
-                "supports_near_resonance_mode_transition": summary[
-                    "resonance_mode_transition"
-                ]["supports_near_resonance_mode_transition"],
-                "centroid_zero_crossing_delta_res": summary[
-                    "resonance_mode_transition"
-                ]["centroid_zero_crossing_delta_res"],
-                "left_fraction_half_crossing_delta_res": summary[
-                    "resonance_mode_transition"
-                ]["left_fraction_half_crossing_delta_res"],
+                "supports_near_resonance_orbit_crossover": summary[
+                    "resonance_orbit_crossover"
+                ]["supports_near_resonance_orbit_crossover"],
+                "centroid_sign_change_bracket_delta_res": summary[
+                    "resonance_orbit_crossover"
+                ]["centroid_sign_change_bracket_delta_res"],
+                "left_fraction_half_bracket_delta_res": summary[
+                    "resonance_orbit_crossover"
+                ]["left_fraction_half_bracket_delta_res"],
             },
             indent=2,
         )
