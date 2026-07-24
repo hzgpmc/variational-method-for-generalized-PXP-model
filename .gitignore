@@ -1,6 +1,9 @@
 # Generated numerical caches, checkpoints, figures, and tables.
 fig1fig2/data/
 fig1fig2/output/
+verification/output/
+output/
+tmp/
 
 # Python and local tool caches.
 __pycache__/
@@ -8,4 +11,3 @@ __pycache__/
 .DS_Store
 .pytest_cache/
 .mypy_cache/
-
