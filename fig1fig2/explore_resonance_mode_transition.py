@@ -12,13 +12,13 @@ questions suggested by Fig. 1:
 
 No numerical dataset is required.  If the leakage background is absent, the
 script generates its 301-by-201 map directly from ``tdvpfun.eom`` with
-resumable row checkpoints.  The 27 unique physical coordinates are locked
-after a
-leakage-and-spacing audit, so regenerating the background cannot silently move
-the strict diagnostic points.  Every marked
-point is reintegrated with exactly the strict TDVP protocol used by the current
-Fig. 1/Fig. 2 reproducer: spin 1/2, K=100, T=10, pole bias and initial phase
-1e-3, DOP853, rtol=1e-9, atol=1e-11, and max_step=0.02.  The script writes a
+resumable row checkpoints.  The 27 unique physical coordinates are selected
+deterministically from that map under recorded coverage and spacing
+constraints; the map hash and resulting coordinates are written together so
+any reselection is explicit and auditable.  Every marked
+point is reintegrated with the current Paper-A protocol: spin 1/2,
+K=100, T=10, pole bias 1e-3, fixed initial phase zero, DOP853, rtol=1e-9,
+atol=1e-11, and max_step=0.02.  The script writes a
 compressed trajectory cache, a quantitative JSON summary, and two
 publication-standard PDF/PNG supplementary figures.  It never edits the TeX
 manuscript.
@@ -57,8 +57,12 @@ DEFAULT_CACHE = DATA_DIR / "supp_resonance_dense_sampling.npz"
 DEFAULT_SUMMARY = OUTPUT_DIR / "supp_resonance_dense_sampling.json"
 DEFAULT_PDF = OUTPUT_DIR / "supp_resonance_mode_transition.pdf"
 DEFAULT_PNG = OUTPUT_DIR / "supp_resonance_mode_transition.png"
-DEFAULT_PORTRAIT_PDF = OUTPUT_DIR / "supp_low_leakage_portrait_grid.pdf"
-DEFAULT_PORTRAIT_PNG = OUTPUT_DIR / "supp_low_leakage_portrait_grid.png"
+DEFAULT_PORTRAIT_PDF = OUTPUT_DIR / "fig2_orbit_mode_transition.pdf"
+DEFAULT_PORTRAIT_PNG = OUTPUT_DIR / "fig2_orbit_mode_transition.png"
+DEFAULT_REGION_V_CACHE = DATA_DIR / "region_v_classical_trajectories.npz"
+DEFAULT_ATLAS_PDF = OUTPUT_DIR / "regions_i_v_trajectory_atlas.pdf"
+DEFAULT_ATLAS_PNG = OUTPUT_DIR / "regions_i_v_trajectory_atlas.png"
+DEFAULT_SELECTION_MANIFEST = DATA_DIR / "selected_points_phi0.json"
 
 
 def resolve_style_file() -> Path:
@@ -81,27 +85,55 @@ import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 
 import tdvpfun
+import select_low_leakage_points as point_selector
+from figure2_selection import (
+    CORE_ATLAS_ROWS,
+    FIG2_ROWS as GRID_ROWS,
+    MODE_POINT_COORDINATES,
+    REGION_STYLE,
+    RESONANCE_COLOR,
+)
 
 
-SCHEMA_VERSION = 6
-BACKGROUND_SCHEMA_VERSION = 1
+def enable_managed_macos_process_pool() -> None:
+    """Work around a restricted ``sysconf`` probe on managed macOS.
+
+    Python 3.12 checks ``SC_SEM_NSEMS_MAX`` before constructing a process
+    pool.  Some sandboxed macOS sessions deny that read even though process
+    pools and their synchronization primitives work normally.  Bypass only
+    that private preflight after reproducing the specific ``PermissionError``;
+    any real pool-construction error is still caught by the serial fallback in
+    :func:`generate_background_cache`.
+    """
+
+    try:
+        os.sysconf("SC_SEM_NSEMS_MAX")
+    except PermissionError:
+        import concurrent.futures.process as process_backend
+
+        process_backend._check_system_limits = lambda: None
+
+
+SCHEMA_VERSION = 15
+BACKGROUND_SCHEMA_VERSION = 3
 
 # This block is the single source of truth for all new integrations.
 T_MAX = 10.0
 SAMPLE_COUNT = 1001
 TDVP_PERIOD = 100
 POLE_BIAS = 1.0e-3
-INITIAL_PHI = 1.0e-3
+INITIAL_PHI = 0.0
 METHOD = "DOP853"
 RTOL = 1.0e-9
 ATOL = 1.0e-11
 MAX_STEP = 0.02
 
 # Pure-code leakage-background protocol.  The default 301-by-201 grid and
-# 250 left-endpoint samples reproduce the historical Fig. 1 landscape.  The
-# lower-tolerance scan is used only as a selection/visualization background;
-# all 27 marked trajectories are independently reintegrated with the strict
-# protocol above.
+# 250 left-endpoint samples retain the historical grid and plotting
+# resolution, but newly generated values follow the current protocol above.
+# The lower-tolerance scan is used only as a selection/visualization
+# background; all 27 marked trajectories are independently reintegrated with
+# the strict protocol above.
 BACKGROUND_MU_RANGE = (-1.5, 1.5)
 BACKGROUND_CHI_RANGE = (0.0, 2.0)
 BACKGROUND_MU_COUNT = 301
@@ -115,79 +147,19 @@ GENERATED_BACKGROUND_SOURCE = (
     "generated_by_explore_resonance_mode_transition.py"
 )
 REPRODUCER_BACKGROUND_SOURCE = "generated_by_reproduce_fig1_fig2.py"
-REPRODUCER_BACKGROUND_SCHEMA_VERSION = 2
-LEGACY_BACKGROUND_SOURCE = "tdvp_L100_sps2_t30.0.pkl"
+REPRODUCER_BACKGROUND_SCHEMA_VERSION = 3
 GENERATED_BACKGROUND_SOURCES = {
     GENERATED_BACKGROUND_SOURCE,
     REPRODUCER_BACKGROUND_SOURCE,
 }
 
-# Point-selection controls.  The non-valley families must lie below 0.05 both
-# on the exploratory background and after strict DOP853 reintegration.  The
-# slightly wider background threshold is needed to retain the geometric bottom
-# of the L1 arc; every selected value remains far below 0.3.  The Euclidean
-# spacing is checked globally, not only within each family.
-BACKGROUND_LOW_LEAKAGE_TARGET = 0.05
+# The constrained optimizer is implemented in
+# ``select_low_leakage_points.py``.  Strict reintegration independently checks
+# that every non-valley point remains below the same leakage threshold.
+BACKGROUND_LOW_LEAKAGE_TARGET = point_selector.ARC_MAX_LEAKAGE
 STRICT_LOW_LEAKAGE_TARGET = 0.05
-MIN_SELECTION_DISTANCE = 0.05
-
-# Five well-separated anchors follow the narrow P1--P2 valley and include the
-# manuscript points P1 and P2 exactly.  This is the one family intentionally
-# exempted from the low-leakage threshold.
-CANONICAL_VALLEY_POINTS = (
-    (-0.020, 0.100),
-    (-0.025, 0.150),
-    (-0.030, 0.205),
-    (-0.035, 0.261),
-    (-0.030, 0.340),
-)
-
-P4 = (-0.677, 1.417)
-
-# The P4-connected low-leakage structure is a two-sided U-shaped arc.  Points
-# are ordered from the negative-delta_res arm through P4 and then along the
-# positive-delta_res arm.  Matching chi levels on the two arms make the
-# coverage visible without clustering near the arc bottom.
-CANONICAL_ARC_POINTS = (
-    (-1.310, 1.880),
-    (-1.150, 1.740),
-    (-0.990, 1.600),
-    (-0.780, 1.460),
-    P4,
-    (-0.590, 1.460),
-    (-0.510, 1.600),
-    (-0.500, 1.740),
-    (-0.510, 1.880),
-)
-
-L1 = (-0.430, 0.860)
-
-# A second U-shaped low-leakage structure passes through L1.  The points are
-# ordered along its upper-left arm, through the minimum-chi arc bottom B5, and
-# then up the nearly vertical right arm.  L1 is stored once here and reused as
-# the shared anchor of the resonance-line portrait row.
-L1_ARC_POINT_IDS = ("B1", "B2", "B3", "L1", "B5", "B6", "B7", "B8", "B9")
-CANONICAL_L1_ARC_POINTS = (
-    (-0.920, 1.180),
-    (-0.750, 1.060),
-    (-0.560, 0.940),
-    L1,
-    (-0.240, 0.750),
-    (-0.140, 0.820),
-    (-0.140, 0.920),
-    (-0.130, 1.060),
-    (-0.120, 1.180),
-)
-
-# L1 itself is already stored in the L1 arc.  The remaining four points sample
-# the higher-chi low-leakage windows of the bare resonance line without
-# duplicating a coordinate or crowding P4.
-RESONANCE_LINE_SAMPLES = (
-    ("L2", 1.34),
-    ("L3", 1.58),
-    ("L4", 1.78),
-    ("L5", 1.98),
-)
+MODE_REPRESENTATIVE_MAX_LEAKAGE = 0.10
+MIN_SELECTION_DISTANCE = point_selector.GLOBAL_MIN_DISTANCE
 
 GROUP_ORDER = ("valley", "arc", "l1_arc", "resonance_line")
 GROUP_STYLE = {
@@ -217,17 +189,6 @@ GROUP_STYLE = {
     },
 }
 
-# Explicit point IDs prevent a shared physical anchor from being integrated
-# twice.  L1 appears in two conceptual rows of Fig. S3 but refers to one cached
-# trajectory.
-GRID_ROWS = (
-    ("valley", ("V1", "V2", "V3", "V4", "V5")),
-    ("arc", ("A1", "A4", "A5", "A6", "A9")),
-    ("l1_arc", ("B1", "L1", "B5", "B6", "B9")),
-    ("resonance_line", ("L1", "L2", "L3", "L4", "L5")),
-)
-
-
 @dataclass(frozen=True)
 class SelectedPoint:
     """One deterministic point selected in the original data-driven audit."""
@@ -241,6 +202,16 @@ class SelectedPoint:
     @property
     def delta_res(self) -> float:
         return self.chi + 2.0 * self.mu
+
+
+# Additional representatives chosen by strict local visual atlases rather
+# than by map leakage alone.  Their coordinates live in the shared selection
+# module so Fig. 1 annotations and Fig. 2 trajectories cannot drift apart.
+MODE_REPRESENTATIVE_POINTS = tuple(
+    SelectedPoint(point_id, "mode_transition", mu_value, chi_value, note)
+    for point_id, (mu_value, chi_value, note)
+    in MODE_POINT_COORDINATES.items()
+)
 
 
 def defect_site(length: int) -> int:
@@ -450,6 +421,7 @@ def generate_background_cache(
                 store_row(generated_index, row)
         else:
             try:
+                enable_managed_macos_process_pool()
                 with ProcessPoolExecutor(max_workers=workers) as executor:
                     futures = {
                         executor.submit(
@@ -521,7 +493,7 @@ def validate_background_cache(
     expected_mu_grid: np.ndarray | None = None,
     expected_chi_grid: np.ndarray | None = None,
 ) -> tuple[bool, str]:
-    """Validate either the historical map or a pure-code generated map."""
+    """Validate a pure-code generated leakage map."""
 
     required = {
         "avg_q_leak",
@@ -600,10 +572,7 @@ def validate_background_cache(
             return False, "background chi grid differs from the request"
 
         source = str(np.asarray(archive["source_name"]).item())
-        if source not in {
-            LEGACY_BACKGROUND_SOURCE,
-            *GENERATED_BACKGROUND_SOURCES,
-        }:
+        if source not in GENERATED_BACKGROUND_SOURCES:
             return False, f"unrecognized background source {source!r}"
         if source in GENERATED_BACKGROUND_SOURCES:
             generated_fields = {
@@ -737,127 +706,34 @@ def minimum_global_spacing(points: list[SelectedPoint]) -> float:
 def select_points(
     mu_grid: np.ndarray, chi_grid: np.ndarray, leakage: np.ndarray
 ) -> list[SelectedPoint]:
-    """Return the locked, low-leakage, well-separated physical coordinates.
+    """Select all supplementary coordinates from the generated map."""
 
-    The full leakage map remains a generated visual/background diagnostic, but
-    small solver or grid changes cannot silently move the Appendix-H points.
-    This makes the strict 27-trajectory conclusion dataset independent.
-    """
-
+    families = point_selector.select_all(mu_grid, chi_grid, leakage)
     selected: list[SelectedPoint] = []
-    if leakage.shape != (len(mu_grid), len(chi_grid)):
-        raise ValueError("leakage background and grids are inconsistent")
-    if not (
-        mu_grid[0] <= BACKGROUND_MU_RANGE[0]
-        and mu_grid[-1] >= BACKGROUND_MU_RANGE[1]
-        and chi_grid[0] <= BACKGROUND_CHI_RANGE[0]
-        and chi_grid[-1] >= BACKGROUND_CHI_RANGE[1]
-    ):
-        raise ValueError("leakage background does not cover the physical map")
-
-    for number, (mu_value, chi_value) in enumerate(
-        CANONICAL_VALLEY_POINTS, start=1
-    ):
-        selected.append(
-            SelectedPoint(
-                f"V{number}",
-                "valley",
-                mu_value,
-                chi_value,
-                (
-                    "well-separated P1/P2-valley anchor; exact P1 and P2 "
-                    "are included"
-                ),
+    family_specs = (
+        ("valley", "valley", False),
+        ("upper_arc", "arc", False),
+        ("lower_arc", "l1_arc", False),
+        # L1 is already stored in lower_arc and is skipped in this last row.
+        ("resonance_line", "resonance_line", True),
+    )
+    for manifest_group, cache_group, skip_l1 in family_specs:
+        for point in families[manifest_group]:
+            if skip_l1 and point.point_id == "L1":
+                continue
+            selected.append(
+                SelectedPoint(
+                    point.point_id,
+                    cache_group,
+                    point.mu,
+                    point.chi,
+                    point.selection_note,
+                )
             )
-        )
-
-    for number, (mu_value, chi_value) in enumerate(
-        CANONICAL_ARC_POINTS, start=1
-    ):
-        selected.append(
-            SelectedPoint(
-                f"A{number}",
-                "arc",
-                mu_value,
-                chi_value,
-                (
-                    "exact manuscript P4 anchor"
-                    if (mu_value, chi_value) == P4
-                    else (
-                        "well-separated point on the two-sided "
-                        "P4-connected low-leakage arc"
-                    )
-                ),
-            )
-        )
-
-    for point_id, (mu_value, chi_value) in zip(
-        L1_ARC_POINT_IDS, CANONICAL_L1_ARC_POINTS
-    ):
-        selected.append(
-            SelectedPoint(
-                point_id,
-                "l1_arc",
-                mu_value,
-                chi_value,
-                (
-                    "shared L1 resonance-line anchor"
-                    if point_id == "L1"
-                    else (
-                        "well-separated point on the two-sided "
-                        "L1-connected low-leakage arc"
-                    )
-                ),
-            )
-        )
-
-    # Remaining points lying exactly on the physical resonance line.  L1 is
-    # omitted here because it is the shared, singly stored anchor above.
-    for point_id, chi_value in RESONANCE_LINE_SAMPLES:
-        selected.append(
-            SelectedPoint(
-                point_id,
-                "resonance_line",
-                -0.5 * float(chi_value),
-                float(chi_value),
-                "well-separated low-leakage sample on chi+2mu=0",
-            )
-        )
-
+    selected.extend(MODE_REPRESENTATIVE_POINTS)
     identifiers = [point.point_id for point in selected]
     if len(identifiers) != len(set(identifiers)):
         raise AssertionError("selected point identifiers must be unique")
-
-    for group in GROUP_ORDER:
-        spacing = minimum_family_spacing(selected, group)
-        if spacing < MIN_SELECTION_DISTANCE - 1.0e-12:
-            raise ValueError(
-                f"{group} minimum spacing {spacing:.6f} is below "
-                f"{MIN_SELECTION_DISTANCE:.6f}"
-            )
-
-    global_spacing = minimum_global_spacing(selected)
-    if global_spacing < MIN_SELECTION_DISTANCE - 1.0e-12:
-        raise ValueError(
-            f"global minimum spacing {global_spacing:.6f} is below "
-            f"{MIN_SELECTION_DISTANCE:.6f}"
-        )
-
-    for point in selected:
-        if point.group == "valley":
-            continue
-        map_leakage = bilinear_value(
-            mu_grid,
-            chi_grid,
-            leakage,
-            point.mu,
-            point.chi,
-        )
-        if map_leakage >= BACKGROUND_LOW_LEAKAGE_TARGET:
-            raise ValueError(
-                f"{point.point_id} background leakage {map_leakage:.6f} "
-                f"is not below {BACKGROUND_LOW_LEAKAGE_TARGET:.3f}"
-            )
     return selected
 
 
@@ -1006,14 +882,80 @@ def generate_cache(
         )
 
     for point, strict_value in zip(points, strict_leakage):
-        if (
-            point.group != "valley"
-            and strict_value >= STRICT_LOW_LEAKAGE_TARGET
-        ):
+        threshold = (
+            MODE_REPRESENTATIVE_MAX_LEAKAGE
+            if point.group == "mode_transition"
+            else STRICT_LOW_LEAKAGE_TARGET
+        )
+        if point.group != "valley" and strict_value >= threshold:
             raise ValueError(
                 f"{point.point_id} strict mean leakage {strict_value:.6f} "
-                f"is not below {STRICT_LOW_LEAKAGE_TARGET:.3f}"
+                f"is not below {threshold:.3f}"
             )
+
+    # The atlas-selected points have explicit visual roles in the trajectory
+    # figures.  Fail
+    # loudly if a solver/code change destroys the ordered right--center--left
+    # transition or the compact endpoint at B.
+    point_index = {point.point_id: index for index, point in enumerate(points)}
+    center_index = point_index["M2C"]
+    if (
+        not np.isclose(points[center_index].mu, -0.45)
+        or not np.isclose(points[center_index].chi, 0.90)
+        or abs(points[center_index].delta_res) > 1.0e-12
+        or not 0.47 <= horizontal_span[center_index] <= 0.52
+        or not 0.16 <= centroid_x[center_index] <= 0.22
+    ):
+        raise ValueError(
+            "M2C no longer matches the requested direct exact-line point"
+        )
+    intermediate_index = point_index["M2R"]
+    if not (
+        left_fraction[intermediate_index] >= 0.98
+        and -0.46 <= centroid_x[intermediate_index] <= -0.35
+        and 0.65 <= horizontal_span[intermediate_index] <= 0.80
+    ):
+        raise ValueError(
+            "M2R no longer provides the clean left-biased region-II mode"
+        )
+    endpoint_index = point_index["M2B"]
+    if not (
+        left_fraction[endpoint_index] >= 0.98
+        and vertical_span[endpoint_index] <= 1.20
+    ):
+        raise ValueError("M2B no longer provides the compact endpoint II5")
+
+    upper_arc_ids = ("M3L", "L3", "M3R")
+    upper_arc_centroids = [centroid_x[point_index[point_id]] for point_id in upper_arc_ids]
+    upper_arc_spans = [horizontal_span[point_index[point_id]] for point_id in upper_arc_ids]
+    if not (
+        upper_arc_centroids[0] > 0.15
+        and abs(upper_arc_centroids[1]) < 0.08
+        and upper_arc_centroids[2] < -0.15
+        and upper_arc_spans[1] < upper_arc_spans[0]
+        and upper_arc_spans[1] < upper_arc_spans[2]
+    ):
+        raise ValueError(
+            "region-III atlas points no longer provide a clean centered transition"
+        )
+    reflected_iii4 = np.asarray(
+        [
+            2.0 * points[point_index["L3"]].mu
+            - points[point_index["M3R"]].mu,
+            2.0 * points[point_index["L3"]].chi
+            - points[point_index["M3R"]].chi,
+        ]
+    )
+    iii2_coordinate = np.asarray(
+        [
+            points[point_index["M3L"]].mu,
+            points[point_index["M3L"]].chi,
+        ]
+    )
+    if np.linalg.norm(iii2_coordinate - reflected_iii4) > 0.02:
+        raise ValueError(
+            "M3L is no longer approximately symmetric with M3R about L3"
+        )
 
     i0 = defect_site(TDVP_PERIOD)
     local_sites = i0 + np.asarray([-1, 0, 1], dtype=int)
@@ -1343,20 +1285,21 @@ def point_rows(archive: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
 def portrait_grid_rows(
     archive: np.lib.npyio.NpzFile,
 ) -> list[dict[str, Any]]:
-    """Return the exact 20 panels displayed in the independent grid."""
+    """Return the exact ten panels displayed in main-text Fig. 2."""
 
     all_rows = {
         row["point"]: row for row in point_rows(archive)
     }
     rows: list[dict[str, Any]] = []
-    for display_group, point_ids in GRID_ROWS:
-        for point_id in point_ids:
+    for display_group, point_specs in GRID_ROWS:
+        for point_id, display_id in point_specs:
             if point_id not in all_rows:
                 raise ValueError(f"portrait point {point_id} is missing")
             source = all_rows[point_id]
             rows.append(
                 {
                     "point": point_id,
+                    "display_id": display_id,
                     "display_group": display_group,
                     "source_group": source["group"],
                     "mu": source["mu"],
@@ -1435,12 +1378,15 @@ def build_summary(
     )
     all_distances[np.diag_indices_from(all_distances)] = np.inf
     global_minimum_spacing = float(np.min(all_distances))
-    non_valley = groups != "valley"
+    low_leakage_families = (
+        (groups != "valley") & (groups != "mode_transition")
+    )
     strict_non_valley = np.asarray(
-        archive["strict_mean_leakage"][non_valley], dtype=float
+        archive["strict_mean_leakage"][low_leakage_families], dtype=float
     )
     background_non_valley = np.asarray(
-        archive["background_map_mean_leakage"][non_valley], dtype=float
+        archive["background_map_mean_leakage"][low_leakage_families],
+        dtype=float,
     )
     with np.load(leakage_path, allow_pickle=False) as background:
         background_source = str(
@@ -1449,12 +1395,34 @@ def build_summary(
         background_shape = list(
             np.asarray(background["avg_q_leak"]).shape
         )
+    selected_families: dict[str, list[dict[str, Any]]] = {}
+    for group in GROUP_ORDER:
+        mask = groups == group
+        selected_families[group] = [
+            {
+                "point_id": str(point_id),
+                "mu": float(mu_value),
+                "chi": float(chi_value),
+                "background_map_mean_leakage": float(map_value),
+                "strict_mean_leakage": float(strict_value),
+                "selection_note": str(note),
+            }
+            for point_id, mu_value, chi_value, map_value, strict_value, note
+            in zip(
+                archive["point_id"][mask],
+                archive["mu"][mask],
+                archive["chi"][mask],
+                archive["background_map_mean_leakage"][mask],
+                archive["strict_mean_leakage"][mask],
+                archive["selection_note"][mask],
+            )
+        ]
     return {
         "schema_version": SCHEMA_VERSION,
         "description": (
             "Geometry-aware, well-separated K=100, T=10 TDVP sampling of "
-            "the P1/P2 valley, both arms of two independent low-leakage "
-            "arcs through P4 and L1, and the resonance line"
+            "regions I--III, both arms of two low-leakage structures, "
+            "and their near-resonance orbit-mode representatives"
         ),
         "artifacts": {
             "trajectory_cache": str(cache_path.resolve()),
@@ -1501,6 +1469,9 @@ def build_summary(
         },
         "selection": {
             "group_counts": group_counts,
+            "mode_transition_count": int(
+                np.count_nonzero(groups == "mode_transition")
+            ),
             "total_points": int(len(groups)),
             "background_low_leakage_target_excluding_valley": (
                 BACKGROUND_LOW_LEAKAGE_TARGET
@@ -1523,58 +1494,18 @@ def build_summary(
             "global_minimum_parameter_space_spacing": (
                 global_minimum_spacing
             ),
-            "P1_P2_valley": {
-                "coordinates": [
-                    list(point) for point in CANONICAL_VALLEY_POINTS
-                ],
-                "rule": (
-                    "five separated anchors spanning the narrow valley, "
-                    "including manuscript points P1 and P2 exactly; this "
-                    "family is exempt from the leakage threshold"
-                ),
-            },
-            "P4_arc": {
-                "coordinates": [
-                    list(point) for point in CANONICAL_ARC_POINTS
-                ],
-                "anchor": list(P4),
-                "rule": (
-                    "nine separated low-leakage coordinates ordered from "
-                    "the negative-delta arm through P4 to the positive-delta "
-                    "arm, with paired chi levels on the two sides"
-                ),
-            },
-            "L1_arc": {
-                "point_ids": list(L1_ARC_POINT_IDS),
-                "coordinates": [
-                    list(point) for point in CANONICAL_L1_ARC_POINTS
-                ],
-                "resonance_anchor": list(L1),
-                "minimum_chi_anchor": list(CANONICAL_L1_ARC_POINTS[4]),
-                "rule": (
-                    "nine separated low-leakage coordinates ordered along "
-                    "the upper-left arm, through the minimum-chi bottom B5, "
-                    "and up the nearly vertical right arm; L1 is stored once"
-                ),
-            },
-            "resonance_line": {
-                "coordinate": "delta_res = chi + 2 mu",
-                "chi_values": [
-                    L1[1],
-                    *[
-                        float(chi_value)
-                        for _, chi_value in RESONANCE_LINE_SAMPLES
-                    ],
-                ],
-                "shared_anchor": (
-                    "L1 is stored in the L1_arc group and reused logically"
-                ),
-                "rule": (
-                    "five separated low-leakage samples spanning the "
-                    "available resonance-line windows, with no duplicated "
-                    "physical coordinate"
-                ),
-            },
+            "mode_representative_max_strict_mean_leakage": (
+                MODE_REPRESENTATIVE_MAX_LEAKAGE
+            ),
+            "families": selected_families,
+            "rule": (
+                "The four map-sampled families minimize generated-map leakage "
+                "in declared coverage regions subject to the spacing constraints "
+                "recorded in selected_points_phi0.json. Additional orbit-mode "
+                "representatives are shortlisted from recorded strict local "
+                "atlases for qualitative clarity; I2, II5, and the resonance "
+                "anchors share the same physical trajectories across figures."
+            ),
         },
         "two_arc_orbit_comparison": {
             "coordinate_definition": (
@@ -1763,13 +1694,11 @@ def plot_parameter_map(
     )
 
 
-def plot_arc_diagnostics(
-    centroid_axis: plt.Axes,
+def plot_left_fraction_diagnostic(
     fraction_axis: plt.Axes,
-    leakage_axis: plt.Axes,
     summary: dict[str, Any],
 ) -> None:
-    """Compare the two physical arcs using their unnormalized signed length."""
+    """Compare the two arcs through their left-half-plane time fraction."""
 
     comparison = summary["two_arc_orbit_comparison"]
     plotted_arcs = (
@@ -1789,44 +1718,12 @@ def plot_arc_diagnostics(
             "mew": 0.75,
             "lw": 1.0,
         }
-        centroid_axis.plot(
-            coordinate,
-            block["centroid_sin_theta_cos_phi"],
-            label=style["label"],
-            **common_style,
-        )
         fraction_axis.plot(
             coordinate,
             block["left_half_plane_fraction"],
             **common_style,
         )
-        leakage_axis.plot(
-            coordinate,
-            block["strict_mean_leakage"],
-            **common_style,
-        )
 
-    centroid_axis.axhline(0.0, color="0.65", lw=0.65)
-    centroid_axis.axvline(0.0, color="0.45", lw=0.65, ls=(0, (3, 2)))
-    centroid_axis.set(
-        xlim=(-0.85, 0.58),
-        xticks=(-0.8, -0.4, 0.0, 0.4),
-        ylim=(-0.65, 0.58),
-        yticks=(-0.5, 0.0, 0.5),
-        xlabel=r"$s_{\rm arc}$",
-        ylabel=(
-            r"$\overline{\sin\theta_{i_0}\cos\phi_{i_0}}$"
-        ),
-    )
-    centroid_axis.text(
-        0.025,
-        0.97,
-        "(b)",
-        transform=centroid_axis.transAxes,
-        va="top",
-        fontsize=8.2,
-        weight="semibold",
-    )
     fraction_axis.axhline(0.5, color="0.65", lw=0.65)
     fraction_axis.axvline(0.0, color="0.45", lw=0.65, ls=(0, (3, 2)))
     fraction_axis.set(
@@ -1835,40 +1732,13 @@ def plot_arc_diagnostics(
         ylim=(-0.05, 1.05),
         yticks=(0.0, 0.5, 1.0),
         xlabel=r"$s_{\rm arc}$",
-        ylabel=(
-            r"$\overline{\Theta[-\sin\theta_{i_0}\cos\phi_{i_0}]}$"
-        ),
+        ylabel=r"$f_-$",
     )
     fraction_axis.text(
         0.025,
         0.97,
-        "(c)",
+        "(b)",
         transform=fraction_axis.transAxes,
-        va="top",
-        fontsize=8.2,
-        weight="semibold",
-    )
-
-    leakage_axis.axhline(
-        STRICT_LOW_LEAKAGE_TARGET,
-        color="0.65",
-        lw=0.65,
-        ls=(0, (3, 2)),
-    )
-    leakage_axis.axvline(0.0, color="0.45", lw=0.65, ls=(0, (3, 2)))
-    leakage_axis.set(
-        xlim=(-0.85, 0.58),
-        xticks=(-0.8, -0.4, 0.0, 0.4),
-        ylim=(0.01, 0.052),
-        yticks=(0.01, 0.03, 0.05),
-        xlabel=r"$s_{\rm arc}$",
-        ylabel=r"$\bar{\Gamma}$",
-    )
-    leakage_axis.text(
-        0.025,
-        0.97,
-        "(d)",
-        transform=leakage_axis.transAxes,
         va="top",
         fontsize=8.2,
         weight="semibold",
@@ -1942,34 +1812,32 @@ def plot_figure(
     """Create one full-width supplementary figure with explicit geometry."""
 
     plt.style.use(resolve_style_file())
-    with np.load(leakage_path) as legacy:
-        mu_grid = np.asarray(legacy["mu"])
-        chi_grid = np.asarray(legacy["chi"])
-        leakage = np.asarray(legacy["avg_q_leak"])
+    with np.load(leakage_path) as background:
+        mu_grid = np.asarray(background["mu"])
+        chi_grid = np.asarray(background["chi"])
+        leakage = np.asarray(background["avg_q_leak"])
 
     # ------------------------------------------------------------------
     # Manual geometry controls.
     #
     # figsize: 7.15 in is the standard two-column width.  The compact height
-    # keeps this to one supplementary row.  ``width_ratios`` allocates slightly
-    # more room to the square parameter map; ``wspace`` is the main knob for
-    # formula-label clearance among the three arc-comparison axes.
+    # keeps the two retained panels to one supplementary row.
+    # ``width_ratios`` gives the one-dimensional diagnostic more horizontal
+    # room, while ``wspace`` controls the gap between the two panels.
     # ------------------------------------------------------------------
-    figure = plt.figure(figsize=(7.15, 2.45))
+    figure = plt.figure(figsize=(7.15, 2.70))
     grid = figure.add_gridspec(
         1,
-        4,
-        left=0.060,
-        right=0.993,
-        bottom=0.205,
-        top=0.805,
-        width_ratios=(1.15, 1.0, 1.0, 1.0),
-        wspace=0.58,
+        2,
+        left=0.080,
+        right=0.985,
+        bottom=0.190,
+        top=0.785,
+        width_ratios=(1.0, 1.36),
+        wspace=0.24,
     )
     map_axis = figure.add_subplot(grid[0])
-    centroid_axis = figure.add_subplot(grid[1])
-    fraction_axis = figure.add_subplot(grid[2])
-    leakage_axis = figure.add_subplot(grid[3])
+    fraction_axis = figure.add_subplot(grid[1])
 
     # The map colorbar is tied to panel (a), so it follows any later map
     # resizing.  Lower the second coordinate to move the bar closer.
@@ -1982,18 +1850,14 @@ def plot_figure(
         chi_grid,
         leakage,
     )
-    plot_arc_diagnostics(
-        centroid_axis,
+    plot_left_fraction_diagnostic(
         fraction_axis,
-        leakage_axis,
         summary,
     )
 
     for axis in [
         map_axis,
-        centroid_axis,
         fraction_axis,
-        leakage_axis,
     ]:
         axis.tick_params(
             direction="in",
@@ -2027,7 +1891,7 @@ def plot_portrait_grid(
     pdf_path: Path,
     png_path: Path,
 ) -> None:
-    """Plot 20 Bloch portraits from four selected physical paths."""
+    """Plot the ten region-I/III portraits used in main-text Fig. 2."""
 
     plt.style.use(resolve_style_file())
 
@@ -2035,20 +1899,20 @@ def plot_portrait_grid(
     # Manual geometry controls.
     #
     # The width is the APS two-column width.  ``left`` leaves room for the
-    # shared physical y label and colored row headings.  ``wspace`` and
-    # ``hspace`` control the gaps between independent unit-circle portraits.
-    # Increase the height only if the coordinate titles need more clearance.
+    # shared physical y label and colored region headings.  The two rows are
+    # regions I and III; the third region-III column uses the region-IV
+    # resonance color.
     # ------------------------------------------------------------------
-    figure = plt.figure(figsize=(7.15, 5.35))
+    figure = plt.figure(figsize=(7.15, 2.86))
     grid = figure.add_gridspec(
         len(GRID_ROWS),
         5,
         left=0.112,
         right=0.990,
-        bottom=0.090,
+        bottom=0.145,
         top=0.955,
         wspace=0.17,
-        hspace=0.23,
+        hspace=0.28,
     )
     point_ids_all = archive["point_id"].astype(str)
     point_index_by_id = {
@@ -2057,11 +1921,11 @@ def plot_portrait_grid(
     panel_index = 0
     axes: list[list[plt.Axes]] = []
 
-    for row_index, (group, point_ids) in enumerate(GRID_ROWS):
+    for row_index, (display_group, point_specs) in enumerate(GRID_ROWS):
         row_axes: list[plt.Axes] = []
         missing = [
             point_id
-            for point_id in point_ids
+            for point_id, _ in point_specs
             if point_id not in point_index_by_id
         ]
         if missing:
@@ -2069,18 +1933,24 @@ def plot_portrait_grid(
                 f"portrait grid is missing points: {', '.join(missing)}"
             )
         selected = [
-            point_index_by_id[point_id] for point_id in point_ids
+            (point_index_by_id[point_id], display_id)
+            for point_id, display_id in point_specs
         ]
-        for column_index, point_index in enumerate(selected):
+        for column_index, (point_index, display_id) in enumerate(selected):
             axis = figure.add_subplot(grid[row_index, column_index])
             row_axes.append(axis)
             point_id = str(archive["point_id"][point_index])
+            trajectory_color = (
+                RESONANCE_COLOR
+                if column_index == 2 and display_group == "region_iii"
+                else REGION_STYLE[display_group]["color"]
+            )
             plot_phase_portrait(
                 axis,
                 np.asarray(archive["theta"][point_index, 1]),
                 np.asarray(archive["phi"][point_index, 1]),
-                GROUP_STYLE[group]["color"],
-                point_id,
+                trajectory_color,
+                display_id,
                 panel_letter(panel_index),
             )
             panel_index += 1
@@ -2109,13 +1979,13 @@ def plot_portrait_grid(
         row_axes[0].text(
             -0.37,
             0.5,
-            GROUP_STYLE[group]["label"],
+            REGION_STYLE[display_group]["label"],
             transform=row_axes[0].transAxes,
             rotation=90,
             ha="center",
             va="center",
             fontsize=7.2,
-            color=GROUP_STYLE[group]["color"],
+            color=REGION_STYLE[display_group]["color"],
             weight="semibold",
             clip_on=False,
         )
@@ -2123,7 +1993,7 @@ def plot_portrait_grid(
 
     figure.text(
         0.545,
-        0.018,
+        0.025,
         r"$\sin\theta_{i_0}\cos\phi_{i_0}$",
         ha="center",
         va="bottom",
@@ -2131,7 +2001,7 @@ def plot_portrait_grid(
     )
     figure.text(
         0.012,
-        0.520,
+        0.545,
         r"$\sin\theta_{i_0}\sin\phi_{i_0}$",
         ha="left",
         va="center",
@@ -2155,6 +2025,142 @@ def plot_portrait_grid(
     plt.close(figure)
 
 
+def plot_complete_region_atlas(
+    archive: np.lib.npyio.NpzFile,
+    region_v_cache: Path,
+    pdf_path: Path,
+    png_path: Path,
+) -> None:
+    """Plot the complete five-row region-I--V trajectory atlas."""
+
+    plt.style.use(resolve_style_file())
+    if not region_v_cache.is_file():
+        raise FileNotFoundError(
+            f"Missing {region_v_cache}; run explore_region_v_trajectories.py first"
+        )
+    with np.load(region_v_cache, allow_pickle=False) as region_v:
+        required = {
+            "times", "point_id", "mu", "chi", "theta", "phi", "K",
+            "pole_bias", "initial_phi", "method", "rtol", "atol", "max_step",
+        }
+        missing = sorted(required.difference(region_v.files))
+        if missing:
+            raise ValueError(
+                "Region-V cache is missing fields: " + ", ".join(missing)
+            )
+        if (
+            int(np.asarray(region_v["K"]).item()) != TDVP_PERIOD
+            or not np.isclose(float(np.asarray(region_v["pole_bias"]).item()), POLE_BIAS)
+            or not np.isclose(float(np.asarray(region_v["initial_phi"]).item()), INITIAL_PHI)
+            or str(np.asarray(region_v["method"]).item()) != METHOD
+            or not np.isclose(float(np.asarray(region_v["rtol"]).item()), RTOL)
+            or not np.isclose(float(np.asarray(region_v["atol"]).item()), ATOL)
+            or not np.isclose(float(np.asarray(region_v["max_step"]).item()), MAX_STEP)
+        ):
+            raise ValueError("Region-V cache uses a different trajectory protocol")
+        region_v_data = {
+            key: np.asarray(region_v[key])
+            for key in ("point_id", "mu", "chi", "theta", "phi")
+        }
+
+    core_ids = archive["point_id"].astype(str)
+    core_index = {point_id: index for index, point_id in enumerate(core_ids)}
+    region_v_ids = region_v_data["point_id"].astype(str)
+    region_v_index = {
+        point_id: index for index, point_id in enumerate(region_v_ids)
+    }
+    atlas_rows = (*CORE_ATLAS_ROWS, (
+        "region_v",
+        tuple((f"V{index}", f"V{index}") for index in range(1, 6)),
+    ))
+
+    figure = plt.figure(figsize=(7.15, 6.45))
+    grid = figure.add_gridspec(
+        5,
+        5,
+        left=0.112,
+        right=0.990,
+        bottom=0.070,
+        top=0.975,
+        wspace=0.17,
+        hspace=0.24,
+    )
+    panel_index = 0
+    for row_index, (display_group, point_specs) in enumerate(atlas_rows):
+        row_axes: list[plt.Axes] = []
+        for column_index, (point_id, display_id) in enumerate(point_specs):
+            axis = figure.add_subplot(grid[row_index, column_index])
+            row_axes.append(axis)
+            if display_group == "region_v":
+                if point_id not in region_v_index:
+                    raise ValueError(f"Region-V atlas point {point_id} is missing")
+                index = region_v_index[point_id]
+                theta = np.asarray(region_v_data["theta"][index, 1], dtype=float)
+                phi = np.asarray(region_v_data["phi"][index, 1], dtype=float)
+                mu_value = float(region_v_data["mu"][index])
+                chi_value = float(region_v_data["chi"][index])
+            else:
+                if point_id not in core_index:
+                    raise ValueError(f"Core atlas point {point_id} is missing")
+                index = core_index[point_id]
+                theta = np.asarray(archive["theta"][index, 1], dtype=float)
+                phi = np.asarray(archive["phi"][index, 1], dtype=float)
+                mu_value = float(archive["mu"][index])
+                chi_value = float(archive["chi"][index])
+
+            plot_phase_portrait(
+                axis,
+                theta,
+                phi,
+                REGION_STYLE[display_group]["color"],
+                display_id,
+                panel_letter(panel_index),
+            )
+            panel_index += 1
+            axis.set_title(
+                rf"$(\mu,\chi)=({mu_value:.2f},{chi_value:.2f})$",
+                fontsize=6.0,
+                pad=1.8,
+            )
+            axis.tick_params(
+                direction="in", top=True, right=True,
+                length=2.4, width=0.62, pad=1.0, labelsize=7.0
+            )
+            if column_index > 0:
+                axis.tick_params(labelleft=False)
+            if row_index < 4:
+                axis.tick_params(labelbottom=False)
+            for spine in axis.spines.values():
+                spine.set_linewidth(0.68)
+
+        row_axes[0].text(
+            -0.37,
+            0.5,
+            REGION_STYLE[display_group]["label"],
+            transform=row_axes[0].transAxes,
+            rotation=90,
+            ha="center",
+            va="center",
+            fontsize=7.2,
+            color=REGION_STYLE[display_group]["color"],
+            weight="semibold",
+            clip_on=False,
+        )
+
+    figure.text(
+        0.545, 0.010, r"$\sin\theta_{i_0}\cos\phi_{i_0}$",
+        ha="center", va="bottom", fontsize=10.5
+    )
+    figure.text(
+        0.012, 0.525, r"$\sin\theta_{i_0}\sin\phi_{i_0}$",
+        ha="left", va="center", rotation=90, fontsize=10.5
+    )
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(pdf_path, bbox_inches="tight", pad_inches=0.025)
+    figure.savefig(png_path, dpi=300, bbox_inches="tight", pad_inches=0.025)
+    plt.close(figure)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2169,7 +2175,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--background-row-dir",
         type=Path,
-        default=DATA_DIR / "supp_leakage_rows",
+        default=DATA_DIR / "fig1_background_rows",
         help="resumable row-checkpoint directory for background generation",
     )
     parser.add_argument(
@@ -2200,6 +2206,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="generate/validate the leakage background and exit",
     )
+    parser.add_argument(
+        "--selection-manifest",
+        type=Path,
+        default=DEFAULT_SELECTION_MANIFEST,
+        help="data-selected main and supplementary point manifest",
+    )
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     parser.add_argument("--summary", type=Path, default=DEFAULT_SUMMARY)
     parser.add_argument("--pdf", type=Path, default=DEFAULT_PDF)
@@ -2210,6 +2222,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--portrait-png", type=Path, default=DEFAULT_PORTRAIT_PNG
     )
+    parser.add_argument(
+        "--region-v-cache", type=Path, default=DEFAULT_REGION_V_CACHE
+    )
+    parser.add_argument("--atlas-pdf", type=Path, default=DEFAULT_ATLAS_PDF)
+    parser.add_argument("--atlas-png", type=Path, default=DEFAULT_ATLAS_PNG)
     parser.add_argument(
         "--force",
         action="store_true",
@@ -2228,12 +2245,16 @@ def main() -> int:
     for path_name in (
         "leakage_cache",
         "background_row_dir",
+        "selection_manifest",
         "cache",
         "summary",
         "pdf",
         "png",
         "portrait_pdf",
         "portrait_png",
+        "region_v_cache",
+        "atlas_pdf",
+        "atlas_png",
     ):
         setattr(args, path_name, getattr(args, path_name).resolve())
     if args.background_workers < 1:
@@ -2275,6 +2296,10 @@ def main() -> int:
         raise RuntimeError(
             f"generated background failed validation: {background_reason}"
         )
+    selection_manifest = point_selector.write_manifest(
+        args.leakage_cache,
+        args.selection_manifest,
+    )
     if args.background_only:
         print(
             json.dumps(
@@ -2286,6 +2311,8 @@ def main() -> int:
                         args.background_chi_count,
                     ],
                     "row_checkpoints": str(args.background_row_dir),
+                    "selection_manifest": str(args.selection_manifest),
+                    "main_points": selection_manifest["families"]["main"],
                 },
                 indent=2,
             )
@@ -2311,13 +2338,23 @@ def main() -> int:
         summary = build_summary(archive, args.cache, args.leakage_cache)
         summary["artifacts"].update(
             {
-                "overview_pdf": None if args.data_only else str(args.pdf),
-                "overview_png": None if args.data_only else str(args.png),
+                "selection_manifest": str(args.selection_manifest),
+                "selection_manifest_sha256": sha256(
+                    args.selection_manifest
+                ),
+                "overview_pdf": None,
+                "overview_png": None,
                 "portrait_grid_pdf": (
                     None if args.data_only else str(args.portrait_pdf)
                 ),
                 "portrait_grid_png": (
                     None if args.data_only else str(args.portrait_png)
+                ),
+                "complete_region_atlas_pdf": (
+                    None if args.data_only else str(args.atlas_pdf)
+                ),
+                "complete_region_atlas_png": (
+                    None if args.data_only else str(args.atlas_png)
                 ),
             }
         )
@@ -2326,17 +2363,16 @@ def main() -> int:
             json.dump(summary, handle, indent=2)
             handle.write("\n")
         if not args.data_only:
-            plot_figure(
-                archive,
-                summary,
-                args.leakage_cache,
-                args.pdf,
-                args.png,
-            )
             plot_portrait_grid(
                 archive,
                 args.portrait_pdf,
                 args.portrait_png,
+            )
+            plot_complete_region_atlas(
+                archive,
+                args.region_v_cache,
+                args.atlas_pdf,
+                args.atlas_png,
             )
 
     print(
@@ -2345,14 +2381,16 @@ def main() -> int:
                 "status": "ok",
                 "cache": str(args.cache),
                 "summary": str(args.summary),
-                "pdf": None if args.data_only else str(args.pdf),
-                "png": None if args.data_only else str(args.png),
+                "pdf": None,
+                "png": None,
                 "portrait_pdf": (
                     None if args.data_only else str(args.portrait_pdf)
                 ),
                 "portrait_png": (
                     None if args.data_only else str(args.portrait_png)
                 ),
+                "atlas_pdf": None if args.data_only else str(args.atlas_pdf),
+                "atlas_png": None if args.data_only else str(args.atlas_png),
                 "supports_repeated_near_bottom_orbit_reorganization": (
                     summary["two_arc_orbit_comparison"][
                         "supports_repeated_near_bottom_orbit_reorganization"
