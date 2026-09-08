@@ -29,6 +29,13 @@ saved: ``P_Wr M_B P_Wr^T`` (local-to-local) and ``P_D M_B P_Wr^T``
 is applied only after full propagation, so sites outside the window continue
 to evolve and mediate feedback normally.
 
+The manuscript stability figure uses only the two-component defect-site
+response to a perturbation initially applied at that same site (the r=0
+subblock).  Its matrix elements are derivatives of the final defect
+Bloch-frame perturbation with respect to its initial value, and the plotted
+rate is lambda_max(t) = log(s_max[M_defect(t)]) / t.  The complete tangent
+map and the radius-resolved subblocks are retained as numerical cross-checks.
+
 The numerical protocol matches the active Paper-A trajectory figures:
 ``K=100``, pole bias ``epsilon=1e-3``, ``phi_i=0``, DOP853, ``rtol=1e-9``,
 ``atol=1e-11``, and ``max_step=0.02``.  The five Region-I and five Region-III
@@ -68,6 +75,7 @@ DEFAULT_MANIFEST = DATA_DIR / "selected_points_phi0.json"
 DEFAULT_CACHE = DATA_DIR / "region_i_iii_ftle.npz"
 DEFAULT_OUTPUT_PREFIX = OUTPUT_DIR / "region_i_iii_ftle"
 DEFAULT_PROJECTED_PREFIX = OUTPUT_DIR / "region_i_iii_projected_ftle"
+DEFAULT_STABILITY_PREFIX = OUTPUT_DIR / "region_i_iii_local_stability"
 STYLE_CANDIDATES = (
     HERE / "hzg-paper.mplstyle",
     HERE.parent / "scripts" / "hzg-paper.mplstyle",
@@ -1075,6 +1083,120 @@ def plot_results(prefix: Path, archive: dict[str, np.ndarray]) -> None:
     plt.close(fig)
 
 
+def plot_local_stability(
+    prefix: Path, archive: dict[str, np.ndarray]
+) -> tuple[Path, Path]:
+    """Plot the defect-site r=0 tangent rate used in the manuscript."""
+
+    if not bool(np.asarray(archive["projected_maps_available"]).item()):
+        raise ValueError("local defect response requires the complete tangent map")
+    radii = np.asarray(archive["projected_radii"], dtype=int)
+    zero_radius = np.flatnonzero(radii == 0)
+    if zero_radius.size != 1:
+        raise ValueError("cache must contain exactly one r=0 response")
+    values = np.asarray(
+        archive["projected_defect_ftle"][:, int(zero_radius[0]), :],
+        dtype=float,
+    )
+
+    plt.style.use(resolve_style_file())
+
+    # Single-column PRB geometry.  The panels are stacked because each must
+    # carry five curves and the two regions require different vertical scales.
+    figure_width = 3.39
+    figure_height = 3.85
+    left_margin = 0.19
+    right_margin = 0.985
+    bottom_margin = 0.115
+    top_margin = 0.965
+    vertical_gap = 0.20
+    curve_width = 1.05
+    colors = ("#0072B2", "#56B4E9", "#009E73", "#E69F00", "#D55E00")
+    line_styles = ("-", "--", "-.", ":", (0, (3, 1, 1, 1)))
+
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(figure_width, figure_height),
+        sharex=True,
+    )
+    fig.subplots_adjust(
+        left=left_margin,
+        right=right_margin,
+        bottom=bottom_margin,
+        top=top_margin,
+        hspace=vertical_gap,
+    )
+
+    times = np.asarray(archive["times"], dtype=float)
+    for panel, (axis, region) in enumerate(zip(axes, ("I", "III"))):
+        indices = np.flatnonzero(archive["region"] == region)
+        if indices.size != 5:
+            raise ValueError(f"expected five Region-{region} trajectories")
+        for color, line_style, index in zip(
+            colors, line_styles, indices
+        ):
+            axis.plot(
+                times[1:],
+                values[index, 1:],
+                color=color,
+                linestyle=line_style,
+                linewidth=curve_width,
+                label=str(archive["display_id"][index]),
+            )
+        axis.axhline(0.0, color="0.70", linewidth=0.6, linestyle="--")
+        axis.set_xlim(0.0, float(times[-1]))
+        axis.set_xticks([0.0, 2.0, 4.0, 6.0, 8.0, 10.0])
+        axis.tick_params(
+            direction="in",
+            top=True,
+            right=True,
+            labelsize=7.7,
+            length=2.6,
+            width=0.65,
+        )
+        axis.text(
+            0.025,
+            0.95,
+            f"({chr(ord('a') + panel)})",
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontweight="semibold",
+            fontsize=8.2,
+        )
+        axis.text(
+            0.975,
+            0.95,
+            f"Region {region}",
+            transform=axis.transAxes,
+            ha="right",
+            va="top",
+            fontsize=8.0,
+        )
+        axis.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.50, 0.82),
+            ncol=5,
+            frameon=False,
+            handlelength=1.25,
+            handletextpad=0.25,
+            columnspacing=0.45,
+            borderaxespad=0.0,
+            fontsize=6.7,
+        )
+
+    axes[-1].set_xlabel(r"$t$", fontsize=9.0, labelpad=2.0)
+    fig.supylabel(r"$\lambda_{\max}(t)$", x=0.035, fontsize=9.5)
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path = prefix.with_suffix(".pdf")
+    png_path = prefix.with_suffix(".png")
+    fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
+    fig.savefig(png_path, dpi=300, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    return pdf_path, png_path
+
+
 def _radius_styles(radii: np.ndarray) -> tuple[np.ndarray, tuple[str, ...]]:
     colors = np.asarray(["#202124", "#0072B2", "#D55E00", "#009E73"])
     line_styles = ("-", "--", "-.", ":")
@@ -1343,6 +1465,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--projected-prefix", type=Path, default=DEFAULT_PROJECTED_PREFIX
     )
+    parser.add_argument(
+        "--stability-prefix", type=Path, default=DEFAULT_STABILITY_PREFIX
+    )
     parser.add_argument("--t-max", type=float, default=T_MAX)
     parser.add_argument("--output-dt", type=float, default=OUTPUT_DT)
     parser.add_argument("--subspace-size", type=int, default=2 * K)
@@ -1429,6 +1554,7 @@ def main() -> None:
     archive = load_cache(args.cache)
     write_tables(args.output_prefix, archive)
     plot_results(args.output_prefix, archive)
+    stability_paths = plot_local_stability(args.stability_prefix, archive)
     projected_paths: list[Path] = []
     if bool(np.asarray(archive["projected_maps_available"]).item()):
         write_projected_tables(args.projected_prefix, archive)
@@ -1456,6 +1582,8 @@ def main() -> None:
     print(f"Wrote {args.output_prefix.with_suffix('.json')}")
     print(f"Wrote {args.output_prefix.with_suffix('.pdf')}")
     print(f"Wrote {args.output_prefix.with_suffix('.png')}")
+    for path in stability_paths:
+        print(f"Wrote {path}")
     if projected_paths:
         print(f"Wrote {args.projected_prefix.with_suffix('.csv')}")
         print(f"Wrote {args.projected_prefix.with_suffix('.json')}")
