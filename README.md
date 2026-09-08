@@ -19,7 +19,7 @@ numerical evolution.
 
 ## One-command reproduction
 
-From the repository root, generate all eight figures used by the manuscript:
+From the repository root, generate all seven figures used by the manuscript:
 
 ```bash
 PAPER_A_PYTHON=python PAPER_A_WORKERS=8 \
@@ -31,11 +31,10 @@ integrates the ED and TDVP dynamics, and creates
 
 - `fig1fig2/output/fig1_leakage_map.pdf`;
 - `fig1fig2/output/fig2_orbit_mode_transition.pdf`;
-- `fig1fig2/output/region_i_iii_projected_ftle_defect_output.pdf`;
+- `fig1fig2/output/region_i_iii_local_stability.pdf`;
 - `output/defect_delta_m_convergence/defect_delta_m_convergence.pdf`;
-- `fig1fig2/output/resonance_line_horizontal_width.pdf`;
 - `fig1fig2/output/ed_tdvp_defect_profiles.pdf`;
-- `fig1fig2/output/region_i_iii_projected_ftle_endpoint_radius.pdf`;
+- `fig1fig2/output/resonance_line_horizontal_width.pdf`;
 - `fig1fig2/output/regions_i_v_trajectory_atlas.pdf`.
 
 The full `301 x 201` leakage scan is the expensive stage.  It is checkpointed
@@ -75,9 +74,9 @@ or solver conventions.
 - `fig1fig2/plot_resonance_line_width.py`: resonance-line width scan.
 - `fig1fig2/explore_region_v_trajectories.py`: region-V selection and strict
   trajectories used in the appendix atlas.
-- `fig1fig2/compute_finite_time_lyapunov.py`: full Bloch-frame tangent-map
-  propagation, radius-resolved local projections, nonlinear validation data,
-  and the two finite-time tangent-amplification figures.
+- `fig1fig2/compute_finite_time_lyapunov.py`: Bloch-frame tangent-map
+  propagation, the defect-site local stability figure, and additional
+  radius-resolved and nonlinear numerical cross-checks.
 - `scripts/benchmark_defect_delta_m_convergence.py`: cell-size and pole-
   regularization convergence of the defect-site response.
 - `scripts/reproduce_paper_a_figures.sh`: complete orchestration entry point.
