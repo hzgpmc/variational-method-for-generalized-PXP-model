@@ -50,12 +50,17 @@ region_v_command=(
   "${python_command[@]}"
   fig1fig2/explore_region_v_trajectories.py
 )
+ftle_command=(
+  "${python_command[@]}"
+  fig1fig2/compute_finite_time_lyapunov.py
+)
 if [[ "${from_scratch}" -eq 1 ]]; then
   background_command+=(--recompute-background)
   supplement_command+=(--force)
   main_command+=(--recompute-core --recompute-phase)
   convergence_command+=(--force)
   resonance_width_command+=(--force)
+  ftle_command+=(--force)
 fi
 
 "${background_command[@]}"
@@ -71,5 +76,7 @@ fi
 "${resonance_width_command[@]}"
 
 "${convergence_command[@]}"
+
+"${ftle_command[@]}"
 
 echo "Paper-A figures and numerical manifests regenerated successfully."
