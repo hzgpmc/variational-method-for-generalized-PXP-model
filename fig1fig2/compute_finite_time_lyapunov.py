@@ -1110,9 +1110,10 @@ def plot_local_stability(
     bottom_margin = 0.115
     top_margin = 0.965
     vertical_gap = 0.20
-    curve_width = 1.05
-    colors = ("#0072B2", "#56B4E9", "#009E73", "#E69F00", "#D55E00")
-    line_styles = ("-", "--", "-.", ":", (0, (3, 1, 1, 1)))
+    curve_width = 1.10
+    # The five colors encode the ordered points within each region.  A single
+    # solid line style avoids a redundant second visual channel.
+    colors = ("#0072B2", "#56B4E9", "#009E73", "#E69F00", "#CC79A7")
 
     fig, axes = plt.subplots(
         2,
@@ -1133,14 +1134,12 @@ def plot_local_stability(
         indices = np.flatnonzero(archive["region"] == region)
         if indices.size != 5:
             raise ValueError(f"expected five Region-{region} trajectories")
-        for color, line_style, index in zip(
-            colors, line_styles, indices
-        ):
+        for color, index in zip(colors, indices):
             axis.plot(
                 times[1:],
                 values[index, 1:],
                 color=color,
-                linestyle=line_style,
+                linestyle="-",
                 linewidth=curve_width,
                 label=str(archive["display_id"][index]),
             )
@@ -1173,10 +1172,16 @@ def plot_local_stability(
             ha="right",
             va="top",
             fontsize=8.0,
+            bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.25},
+            zorder=5,
+        )
+        legend_position = (
+            {"loc": "upper center", "bbox_to_anchor": (0.64, 0.82)}
+            if region == "I"
+            else {"loc": "lower right", "bbox_to_anchor": (0.98, 0.055)}
         )
         axis.legend(
-            loc="upper center",
-            bbox_to_anchor=(0.50, 0.82),
+            **legend_position,
             ncol=5,
             frameon=False,
             handlelength=1.25,
